@@ -1,0 +1,330 @@
+proc import datafile="F:\course\550\project\good_data_revisedtest.csv"
+     out=life_expect
+     dbms=csv
+     replace;
+     getnames=yes;
+run;
+
+/*Removing missing data*/
+DATA life_expect1; 
+SET life_expect; 
+CHK=FertRate+Measles+Sanitation+WaterSource+InternetUsers+Cellphone+MortRate+Population+tuberculosis+unemployment+lifeExpectancy;
+ IF CHK=. THEN DELETE;  DROP CHK;
+ /*get corr matrix for preliminary analysis*/
+proc corr data=life_expect1;
+run;
+
+
+
+PROC CLUSTER DATA=life_expect1 S STANDARD METHOD=average
+     PSEUDO OUTTREE=TREELIFE;
+ VAR FertRate Measles Sanitation WaterSource InternetUsers Cellphone MortRate Population tuberculosis  unemployment lifeExpectancy;
+ ID Code;
+ RUN;
+
+ PROC GPLOT DATA=TREELIFE;
+ PLOT _PSF_*_NCL_= 1 /HAXIS=0 TO 20 BY 1 VAxis=0 to 300 by 10 VAxis=Axis1;
+ Axis1 Label=(A=90)
+ order=0 to 300 by 100;
+ Symbol1 C=Black V=Dot I=SplineS;
+ RUN; quit;
+
+PROC TREE DATA=TREELIFE OUT=TREEOUTLIFE NCLUSTERS=3 VAxis=Axis1;
+ COPY FertRate Measles Sanitation WaterSource InternetUsers Cellphone MortRate Population tuberculosis unemployment lifeExpectancy;
+ ID Code;
+ Axis1 Label=(A=90);
+ RUN;
+
+ PROC SORT DATA=TREEOUTLIFE; BY CLUSTER;
+ proc print data=treeoutlife;
+ by cluster;
+ run;
+ proc means data=treeoutlife;
+ by cluster;
+ var lifeExpectancy;
+ run;
+ /*from corr matrix, we find out that population and unemployment are not related to other varaibles(p-value>0.05)*/
+/*They should not be included in PCA and FA*/
+proc princomp data=life_expect1 out=prin;
+var FertRate--mortrate tuberculosis ;
+run;
+
+ /*from above we can define tree groups. good is >=75, medium is 64<= lifeExpectancy<75,bad is <64*/
+data rawdat;
+set prin;
+if lifeExpectancy>=75 then index=2;
+if lifeExpectancy <75 and lifeExpectancy>=64 then index=1;
+if lifeExpectancy<64 then index=0;
+if index=2 then Cat="good";
+if index=1 then Cat="mid";
+if index=0 then cat="bad";
+run;
+/*partition the data into training group and test group*/
+proc surveyselect  data=rawdat out=split  rate=0.7 outall;
+run;
+proc sql;
+create table life as select * from split where selected=1;
+quit;
+proc sql;
+create table test as select * from split where selected=0;
+quit;
+
+/*classify using orginal variables,without reducing the varaibles.*/
+title1 "discrimination";
+proc discrim data= life crossvalidate mahalanobis;
+class index;
+var FertRate--unemployment;
+run;
+title2 'Stepwise Seletion';
+PROC STEPDISC DATA=life METHOD=Stepwise SLE=.40 SLS=.05;
+ CLASS index;
+ VAR FertRate--unemployment;
+ RUN;
+/* using only significant variables*/
+ proc discrim data=life crossvalidate mahalanobis;
+class index;
+var Sanitation tuberculosis InternetUsers MortRate;
+run;
+/*validate discrimination model,using Maximum Likelyhood function*/
+data test1;
+set test;
+L0=-40.19829+0.37061*Sanitation+0.02190*tuberculosis+0.23326*InternetUsers+0.72252*Mortrate;
+L1=-26.16463+0.44593*Sanitation+0.01526*tuberculosis+0.11563*InternetUsers+0.48469*Mortrate;
+L2=-31.20009+0.45058*Sanitation+0.01253*tuberculosis+0.21249*InternetUsers+0.46791*Mortrate;
+run;
+data test1;
+set test1;
+if L0>L1 and L0>L2 then pred=0;
+if L1>L0 and L1>L2 then pred=1;
+if L2>L0 and L2>L1 then pred=2;
+run;
+/*we can use this table to calculate missclassification*/
+PROC FREQ;
+ TABLES index*pred;
+ RUN;
+
+/*plot main effect and contour*/
+/*from Stepdisc,F values of Mortrate and Internetusers are the laregest two.Plot them*/
+Proc Means Data=life NoPrint;
+ Var Mortrate Internetusers;
+ Output Out=life_m Min=MinM MinI Max=MaxM MaxI;
+Run;
+
+Data Plotlife;
+ If _N_=1 Then Set life_m;
+ IncM=(MaxM-MinM)/50;
+ IncI=(MaxI-MinI)/50;
+ Do Mortrate = (MinM-IncM) To (MaxM+IncM) By IncM;
+   Do Internetusers = (MinI-IncI) To (MaxI+IncI) By IncI;
+     Output;
+     Keep Mortrate Internetusers;
+   End;
+ End;
+ Stop;
+Run;
+
+Proc DISCRIM Data=life
+             Testdata=Plotlife TestOut=PlotP TestOutD=PlotD;
+   Class cat;
+   
+Run;
+
+/*Mortrate and Internetusers are the most important in stepwise selection*/
+ PROC GPLOT DATA=life;
+ plot Mortrate*Internetusers = Index/ HAxis=Axis1 VAxis=Axis2;
+ Axis1  Order=(-10 To 110 By 10);
+ Axis2  Order=(-10To 200 By 10);
+ Symbol1 V=circle H=0.7 I=None C=RED;
+ Symbol2 V=Star H=0.7 I=None C=BLACK;
+ symbol3 V=dot H=0.7 I=None C=BLUE;
+run; quit;
+
+Title2 'Plot of Estimated Densities';
+Proc GContour Data=PlotD;
+ Title3 "life";
+plot Mortrate*Internetusers = bad/ HAxis=Axis1 VAxis=Axis2;
+  Axis1  Order=(-10 To 110 By 10);
+ Axis2  Order=(-10To 200 By 10);
+Run; quit;
+
+Proc GContour Data=PlotD;
+ Title3 "life";
+plot Mortrate*Internetusers = mid/ HAxis=Axis1 VAxis=Axis2;
+  Axis1  Order=(-10 To 110 By 10);
+ Axis2  Order=(-10To 200 By 10);
+Run; quit;
+
+Proc GContour Data=PlotD;
+ Title3 "life";
+plot Mortrate*Internetusers = good/ HAxis=Axis1 VAxis=Axis2;
+  Axis1  Order=(-10 To 110 By 10);
+ Axis2  Order=(-10To 200 By 10);
+Run; quit;
+
+Title2 'Plot of Classification Results';
+Proc GPlot Data=PlotP;
+ Plot Mortrate*Internetusers=_Into_;
+Symbol1 V=circle H=0.7 I=None C=RED;
+ Symbol2 V=Star H=0.7 I=None C=BLACK;
+ symbol3 V=dot H=0.7 I=None C=BLUE;
+Run; quit;
+
+
+
+
+
+
+
+
+
+TITLE2 'logistic';
+PROC LOGISTIC DATA=life;
+ MODEL index =FertRate-- unemployment/SELECTION=BACKWARD SLSTAY=.05;
+ OUTPUT OUT=PDICTS  PREDICTED=PHAT;
+
+DATA ONE;
+ SET PDICTS;
+ IF _LEVEL_=0 THEN P1=PHAT;
+
+ IF _LEVEL_=0;
+
+DATA TWO;
+ SET PDICTS;
+ IF _LEVEL_=1 THEN P2=PHAT;
+ IF _LEVEL_=1;
+
+DATA THREE; DROP _LEVEL_;
+ MERGE ONE TWO;
+ P2=P2-P1;
+ P3=1-P1-P2;
+RUN;
+
+DATA FINAL; SET THREE;
+ IF P1>P2 AND P1>P3 THEN PREDICT=0;
+ IF P2>P1 AND P2>P3 THEN PREDICT=1;
+ IF P3>P1 AND P3>P2 THEN PREDICT=2;
+ run;
+
+ PROC PRINT data=final; 
+
+VAR index P1 P2 P3 PREDICT;
+
+PROC FREQ;
+ TABLES index*PREDICT;
+ RUN;
+
+
+/*validate logistic model*/
+data test2;
+set test;
+ph1=1/(1+exp(-(-14.3838+0.2202*MortRate+0.00762*tuberculosis-0.1453*unemployment)));
+ph2=1/(1+exp(-(-2.1323+0.2202*MortRate+0.00762*tuberculosis-0.1453*unemployment)));
+p1=ph1;
+p2=ph2-ph1;
+p3=1-p1-p2;
+run;
+DATA test2; SET test2;
+ IF P1>P2 AND P1>P3 THEN PREDICT=0;
+ IF P2>P1 AND P2>P3 THEN PREDICT=1;
+ IF P3>P1 AND P3>P2 THEN PREDICT=2;
+ run;
+
+ PROC PRINT data=test2; 
+
+VAR index P1 P2 P3 PREDICT;
+
+PROC FREQ;
+ TABLES index*PREDICT;
+ RUN;
+
+
+
+
+/*discrimination using principal component method to reduce variables*/
+ /*only the eigen value of prin1 is greater than 1,we choose prin1*/
+proc stepdisc data=life method=stepwise sle=0.4 sls=0.05;
+class index;
+var prin1 population unemployment;
+run;
+/*from above we can find out that population and unemployment are insiginificant*/
+proc discrim data=life crossvalidate mahalanobis;
+class index;
+var prin1;
+run;
+/*reduce the variables, but missclassification rate very close.*/
+
+
+/*validate discrimination model,using Maximum Likelyhood function*/
+/*this can be found on table Linear Discriminant Function for index*/
+data test2;
+set test;
+L0=-3.60887-2.20305*prin1;
+L1=-0.00144+0.04395*prin1;
+L2=-1.39445+1.36943*prin1;
+if L0>L1 and L0>L2 then pred=0;
+if L1>L0 and L1>L2 then pred=1;
+if L2>L0 and L2>L1 then pred=2;
+run;
+/*calcalate missclassification*/
+PROC FREQ data=test2;
+ TABLES index*pred;
+ RUN;
+
+
+TITLE2 'logistic,using principal componient ';
+PROC LOGISTIC DATA=life;
+ MODEL index =prin1 population unemployment/SELECTION=BACKWARD SLSTAY=.05;
+ OUTPUT OUT=PDICTS  PREDICTED=PHAT;
+
+DATA ONE;
+ SET PDICTS;
+ IF _LEVEL_=0 THEN P1=PHAT;
+
+ IF _LEVEL_=0;
+
+DATA TWO;
+ SET PDICTS;
+ IF _LEVEL_=1 THEN P2=PHAT;
+ IF _LEVEL_=1;
+
+DATA THREE; DROP _LEVEL_;
+ MERGE ONE TWO;
+ P2=P2-P1;
+ P3=1-P1-P2;
+RUN;
+
+DATA FINAL; SET THREE;
+ IF P1>P2 AND P1>P3 THEN PREDICT=0;
+ IF P2>P1 AND P2>P3 THEN PREDICT=1;
+ IF P3>P1 AND P3>P2 THEN PREDICT=2;
+ run;
+
+ PROC PRINT data=final; 
+
+VAR index P1 P2 P3 PREDICT;
+
+PROC FREQ;
+ TABLES index*PREDICT;
+ RUN;
+ /*validate logistic model*/
+data test2;
+set test;
+ph1=1/(1+exp(-(-4.2059-1.8331*prin1)));
+ph2=1/(1+exp(-(2.7091-1.8331*prin1)));
+p1=ph1;
+p2=ph2-ph1;
+p3=1-p1-p2;
+run;
+DATA test2; SET test2;
+ IF P1>P2 AND P1>P3 THEN PREDICT=0;
+ IF P2>P1 AND P2>P3 THEN PREDICT=1;
+ IF P3>P1 AND P3>P2 THEN PREDICT=2;
+ run;
+
+ PROC PRINT data=test2; 
+
+VAR index P1 P2 P3 PREDICT;
+
+PROC FREQ;
+ TABLES index*PREDICT;
+ RUN;
